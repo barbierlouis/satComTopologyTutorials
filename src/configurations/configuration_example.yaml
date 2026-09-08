@@ -1,9 +1,33 @@
 simulation_name: my_super_tutorial_example
-constellation_file: configurations/constellation_25_25.txt
-ground_station_file: configurations/ground_stations.txt
-ground_station_link_range: 200000 # 1000 km range
-start_date: 01/01/2024 10:00:00
-end_date: 01/02/2024 10:00:00
+start_date: "2026-01-01 00:00:00.000000"
+end_date: "2026-01-01 00:00:10.000000"
 movement_model: pyorbital
-distance_model: geopy
-disable_ground_station_link_preload: False
+distance_model: sklearn
+
+ground_objects_properties:
+  - identifier: Example Ground Stations
+    data_file: configurations/ground_stations.txt
+    type: ground_station
+    connectivity_properties:
+      elevation_above_horizon: 20
+      ground_to_space_connections_strategy: everything-visible
+
+walker_shells:
+  - type: delta
+    constellation_property:
+      identifier: Delta Walker
+      amount_of_orbit_plane: 12
+      amount_of_satellite_per_orbit_plane: 22
+      inclination: 70.0
+      phase_difference_between_satellites: true
+      mean_revolution_per_day: 15.0
+    orbital_connectivity_property:
+      adjacent_inter_satellite_shifting: 0
+      maximum_inter_satellite_count: 4
+      maximum_inter_satellite_range_distance: 1000
+      maximum_ground_station_range: 5000
+      maximum_user_terminal_range: 1000
+      maximum_connected_ground_object: 10000
+      maximum_connected_user_terminal: 1000
+      maximum_connected_ground_station: 10
+    ground_object_white_list: []
