@@ -1,0 +1,21 @@
+[project]
+name = "sat-com-topology-tutorials"
+version = "5.0.0"
+description = "Jupyter tutorials and labs for satComTopology"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "sat-com-topology>=5.0.4",
+    "networkx>=3.2.1",
+    "igraph>=0.11",
+    "geopy>=2.4.1",
+    "jupyter>=1.0.0",
+]
+
+[tool.uv]
+# Notebooks and helper modules only: nothing to build or install as a package.
+package = false
+
+[tool.uv.sources]
+sat-com-topology = { git = "https://github.com/elbarbi/satComTopology.git", branch = "develop" }
