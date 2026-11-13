@@ -11,6 +11,47 @@ from typing import Any
 from typing import Optional, Dict, Tuple
 
 import networkx as nx
+from sat_com_adapter.cesium_renderer.models import (
+    CesiumProperty,
+    CesiumRendererGroundObjectProperty,
+    CesiumRendererShellProperty,
+)
+from sat_com_adapter.cesium_renderer.utils import color_to_rgba
+
+
+def css_color(color: str) -> str:
+    """
+    A satComTopology Cesium color name (`"DODGERBLUE"`, see `sat_com_adapter/CESIUM_COLOR.md`)
+    as a CSS hex color. A CSS hex color (`"#2a78d6"`) is returned as is.
+    """
+    if color.startswith("#"):
+        return color
+    red, green, blue, _ = color_to_rgba(color)
+    if (red, green, blue) == (0, 0, 0) and color.upper() != "BLACK":
+        raise ValueError(f"Unknown Cesium color {color!r}: see sat_com_adapter/CESIUM_COLOR.md")
+    return f"#{int(red):02x}{int(green):02x}{int(blue):02x}"
+
+
+def default_cesium_property() -> CesiumProperty:
+    """
+    The style of the tutorials: ascending satellites in blue, descending ones in orange.
+    Same configuration as satComTopology's `CesiumRenderer`: it can be given to both.
+    """
+    return CesiumProperty(
+        cesium_renderer_shell_property=CesiumRendererShellProperty(
+            ascending_satellite_color="DODGERBLUE",
+            descending_satellite_color="DARKORANGE",
+            orbital_inter_satellite_link_color="DARKTURQUOISE",
+            adjacent_inter_satellite_link_color="SLATEBLUE",
+            inter_shell_satellite_link_color="DEEPPINK",
+            inter_satellite_link_width=1.5,
+        ),
+        cesium_renderer_ground_object_property=CesiumRendererGroundObjectProperty(
+            ground_object_color="ORCHID",
+            ground_object_link_color="GOLD",
+            ground_object_link_width=2.5,
+        ),
+    )
 
 
 def _snake_to_title(key: str) -> str:
@@ -129,7 +170,15 @@ class CesiumGraphVisualizer:
         }});"""
     
     def _get_node_color(self, node_data: Dict) -> str:
-        """Get color for a node based on its type."""
+        """Get color for a node: its orbital phase for a satellite (NetworkX export), else its type."""
+        orbital_phase = str(node_data.get("orbital_phase", "")).lower()
+        if orbital_phase in ("ascending", "descending"):
+            shell_property = default_cesium_property().cesium_renderer_shell_property
+            return (
+                shell_property.ascending_satellite_color
+                if orbital_phase == "ascending"
+                else shell_property.descending_satellite_color
+            )
         node_type = node_data.get("type", "Unknown")
         return self.NODE_COLORS.get(node_type, "WHITE")
     
@@ -510,14 +559,25 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
       the labels of close nodes. Defaults to `(0, -18)`.
     - edge `intervals`: list of `(start, end)` datetimes during which the link exists.
 
-    Nodes are colored per `shell` (falls back to `type`), edges per `direction`
-    (`orbital`, `adjacent`, `inter_shell`, `ground`).
+    Colors and link widths come from a satComTopology `CesiumProperty`, the configuration
+    of its `CesiumRenderer` (`cesium_property`, defaults to `default_cesium_property()`):
+    - satellites (`type="Satellite"`): `ascending_satellite_color` while the satellite
+      goes north, `descending_satellite_color` while it goes south (computed from its
+      `positions`), `satellites_size` (30000 = 8 px). Per shell with
+      `shell_custom_properties`, matched on the node `shell`.
+    - ISLs, per edge `direction` (`orbital`, `adjacent`, `inter_shell`): the
+      `*_inter_satellite_link_color` and `inter_satellite_link_width` of the shell of
+      their ends. An inter-shell link takes the first shell of `shell_custom_properties`
+      among its two ends, else the default shell property.
+    - ground objects and `ground` links: `cesium_renderer_ground_object_property`, per
+      node `ground_domain` with `ground_object_domain_custom_properties`.
+    Colors are Cesium names (`sat_com_adapter/CESIUM_COLOR.md`) or CSS hex colors.
 
     `live_values`: `{label: [(time, text), ...]}`, values shown in the info panel,
     each one updated to its latest sample as the clock runs.
 
     `highlighted_paths`: `{label: {"color": css, "samples": [(time, [node ids])]}}`,
-    a path per sample time (e.g. a shortest path computed at each tick). Each hop is
+    (`color` defaults to the `route_link_color` of the default shell property), a path per sample time (e.g. a shortest path computed at each tick). Each hop is
     underlined in the path color until the next sample. Other links are dimmed.
 
     `time_series`: `{"title": str, "unit": str, "series": {label: {"color": css,
@@ -530,15 +590,16 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
     The page plays the simulation with Cesium's clock: use the timeline to scrub.
     """
 
-    SHELL_PALETTE = ["#4FC3F7", "#FFB74D", "#81C784", "#E57373", "#BA68C8", "#FFF176"]
-
-    # direction -> (color, legend label)
-    LINK_STYLES = {
-        "orbital": ("#26C6DA", "orbital ISL"),
-        "adjacent": ("#5C6BC0", "adjacent ISL"),
-        "inter_shell": ("#FF4081", "inter-shell ISL"),
-        "ground": ("#FFEB3B", "ground link"),
+    # direction -> legend label, in legend order
+    LINK_LABELS = {
+        "orbital": "orbital ISL",
+        "adjacent": "adjacent ISL",
+        "inter_shell": "inter-shell ISL",
+        "ground": "ground link",
     }
+    # Pixel size of a point for the default sizes of CesiumProperty (meters in CesiumRenderer).
+    SATELLITE_PIXELS_PER_DEFAULT_SIZE = 8 / 30000
+    GROUND_OBJECT_PIXELS_PER_DEFAULT_SIZE = 12 / 5000
 
     def __init__(
         self,
@@ -552,6 +613,7 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
         live_values: Optional[Dict[str, list]] = None,
         highlighted_paths: Optional[Dict[str, dict]] = None,
         time_series: Optional[dict] = None,
+        cesium_property: Optional[CesiumProperty] = None,
     ):
         super().__init__(graph, title, cesium_token)
         self.start_time = start_time
@@ -561,16 +623,90 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
         self.live_values = live_values or {}
         self.highlighted_paths = highlighted_paths or {}
         self.time_series = time_series
+        self.cesium_property = cesium_property or default_cesium_property()
 
-        groups = sorted({self._node_group(data) for _, data in graph.nodes(data=True)})
-        self.group_colors = {
-            group: self.SHELL_PALETTE[index % len(self.SHELL_PALETTE)]
-            for index, group in enumerate(groups)
+        # Same lookups as satComTopology's CesiumFormat.
+        self.shells_custom_properties = {
+            custom.shell_identifier: custom.cesium_property for custom in self.cesium_property.shell_custom_properties
+        }
+        self.ground_domains_custom_properties = {
+            custom.ground_object_domain: custom.cesium_property
+            for custom in self.cesium_property.ground_object_domain_custom_properties
         }
 
     @staticmethod
     def _node_group(node_data: Dict) -> str:
         return str(node_data.get("shell") or node_data.get("type", "Unknown"))
+
+    @staticmethod
+    def _is_satellite(node_data: Dict) -> bool:
+        return node_data.get("type") == "Satellite"
+
+    def _shell_property(self, node_data: Dict) -> CesiumRendererShellProperty:
+        return self.shells_custom_properties.get(
+            node_data.get("shell"), self.cesium_property.cesium_renderer_shell_property
+        )
+
+    def _ground_object_property(self, node_data: Dict) -> CesiumRendererGroundObjectProperty:
+        return self.ground_domains_custom_properties.get(
+            node_data.get("ground_domain"), self.cesium_property.cesium_renderer_ground_object_property
+        )
+
+    def _node_style(self, node_data: Dict) -> Dict:
+        """Legend group, ascending / descending colors and pixel size of a node."""
+        if self._is_satellite(node_data):
+            shell_property = self._shell_property(node_data)
+            return {
+                "kind": "satellite",
+                "ascending": css_color(shell_property.ascending_satellite_color),
+                "descending": css_color(shell_property.descending_satellite_color),
+                "size": round(shell_property.satellites_size * self.SATELLITE_PIXELS_PER_DEFAULT_SIZE, 1),
+            }
+        ground_property = self._ground_object_property(node_data)
+        color = css_color(ground_property.ground_object_color)
+        return {
+            "kind": "ground",
+            "ascending": color,
+            "descending": color,
+            "size": round(ground_property.ground_object_size * self.GROUND_OBJECT_PIXELS_PER_DEFAULT_SIZE, 1),
+        }
+
+    def _edge_style(self, a_data: Dict, b_data: Dict, direction: str) -> Tuple[str, float]:
+        """(CSS color, width) of a link, from the shell or ground object property of its ends."""
+        if direction == "ground":
+            ground_data = b_data if self._is_satellite(a_data) else a_data
+            ground_property = self._ground_object_property(ground_data)
+            return css_color(ground_property.ground_object_link_color), ground_property.ground_object_link_width
+
+        shells = (a_data.get("shell"), b_data.get("shell"))
+        shell_property = next(
+            (
+                custom.cesium_property
+                for custom in self.cesium_property.shell_custom_properties
+                if custom.shell_identifier in shells
+            ),
+            self.cesium_property.cesium_renderer_shell_property,
+        )
+        color = {
+            "orbital": shell_property.orbital_inter_satellite_link_color,
+            "adjacent": shell_property.adjacent_inter_satellite_link_color,
+            "inter_shell": shell_property.inter_shell_satellite_link_color,
+        }.get(direction, "WHITE")
+        return css_color(color), shell_property.inter_satellite_link_width
+
+    def _phase_changes(self, samples: list) -> list:
+        """[[seconds, ascending], ...] at each change of orbital phase: ascending while the latitude grows."""
+        changes = []
+        for index, (moment, _, latitude, _) in enumerate(samples):
+            if index + 1 < len(samples):
+                ascending = samples[index + 1][2] >= latitude
+            elif index > 0:
+                ascending = latitude >= samples[index - 1][2]
+            else:
+                ascending = True
+            if not changes or changes[-1][1] != ascending:
+                changes.append([self._seconds(moment), ascending])
+        return changes
 
     def _seconds(self, moment) -> float:
         return round((moment - self.start_time).total_seconds(), 3)
@@ -590,18 +726,24 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
     def _nodes_payload(self) -> list:
         nodes = []
         for node_id, data in self.graph.nodes(data=True):
+            positions = sorted(data.get("positions", []), key=lambda s: s[0])
             samples = []
-            for moment, longitude, latitude, altitude in sorted(data.get("positions", []), key=lambda s: s[0]):
+            for moment, longitude, latitude, altitude in positions:
                 samples += [self._seconds(moment), round(longitude, 5), round(latitude, 5), round(altitude, 1)]
             if not samples:
                 continue
+            style = self._node_style(data)
+            static = bool(data.get("static", False))
             nodes.append(
                 {
                     "id": str(node_id),
                     "name": str(data.get("name", node_id)),
                     "group": self._node_group(data),
-                    "color": self.group_colors[self._node_group(data)],
-                    "static": bool(data.get("static", False)),
+                    "ascending": style["ascending"],
+                    "descending": style["descending"],
+                    "size": style["size"],
+                    "phases": [[0, True]] if static or style["kind"] == "ground" else self._phase_changes(positions),
+                    "static": static,
                     "description": HtmlFormatter(self._static_attributes(data)).format(),
                     "samples": samples,
                     "labels": self._text_samples(data.get("label_samples", [])),
@@ -617,12 +759,14 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
             if not intervals:
                 continue
             direction = str(data.get("direction", data.get("type", "Unknown")))
+            color, width = self._edge_style(self.graph.nodes[u], self.graph.nodes[v], direction)
             edges.append(
                 {
                     "a": str(u),
                     "b": str(v),
                     "direction": direction,
-                    "color": self.LINK_STYLES.get(direction, ("#FFFFFF", direction))[0],
+                    "color": color,
+                    "width": width,
                     "description": HtmlFormatter(self._static_attributes(data)).format(),
                     "intervals": intervals,
                 }
@@ -635,6 +779,9 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
     def _hop_key(a, b) -> tuple:
         a, b = str(a), str(b)
         return (a, b) if a <= b else (b, a)
+
+    def _route_color(self, route: dict) -> str:
+        return css_color(route.get("color") or self.cesium_property.cesium_renderer_shell_property.route_link_color)
 
     def _routes_payload(self) -> list:
         """Each path sample holds until the next one: merge it into per-hop intervals."""
@@ -656,7 +803,7 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
             routes.append(
                 {
                     "label": label,
-                    "color": route["color"],
+                    "color": self._route_color(route),
                     "width": self.PATH_WIDTHS[min(index, len(self.PATH_WIDTHS) - 1)],
                     "hops": [{"a": a, "b": b, "intervals": intervals} for (a, b), intervals in hops.items()],
                 }
@@ -678,7 +825,7 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
             "series": [
                 {
                     "label": label,
-                    "color": series["color"],
+                    "color": css_color(series["color"]),
                     "points": [
                         [self._seconds(moment), clean(value)]
                         for moment, value in sorted(series["samples"], key=lambda sample: sample[0])
@@ -688,27 +835,59 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
             ],
         }
 
-    def _link_styles_in_use(self) -> Dict[str, tuple]:
-        """The link styles of the directions present in the graph (legend and counters)."""
+    def _directions_in_use(self) -> list:
+        """The link directions present in the graph, in legend order (legend and counters)."""
         directions = {
             str(data.get("direction", data.get("type", "Unknown"))) for _, _, data in self.graph.edges(data=True)
         }
-        return {direction: style for direction, style in self.LINK_STYLES.items() if direction in directions}
+        return [direction for direction in self.LINK_LABELS if direction in directions]
 
     def _legend_html(self) -> str:
-        items = [
-            f'<div class="legend-item"><div class="legend-color" style="background-color: {color};"></div>'
-            f"<span>{html.escape(group)}</span></div>"
-            for group, color in self.group_colors.items()
+        def dot(color, size=14):
+            return (
+                f'<div class="legend-color" style="background-color: {color}; width: {size}px; height: {size}px;"></div>'
+            )
+
+        def item(swatch, label):
+            return f'<div class="legend-item">{swatch}<span>{html.escape(label)}</span></div>'
+
+        # Nodes: one entry per style, listing the shells (or ground groups) that share it.
+        node_styles = {}
+        for _, data in self.graph.nodes(data=True):
+            style = self._node_style(data)
+            key = (style["kind"], style["ascending"], style["descending"], style["size"])
+            groups = node_styles.setdefault(key, [])
+            if self._node_group(data) not in groups:
+                groups.append(self._node_group(data))
+        satellite_styles = [key for key in node_styles if key[0] == "satellite"]
+        items = []
+        for key, groups in node_styles.items():
+            kind, ascending, descending, size = key
+            size = max(8, min(18, size + 4))
+            if kind == "ground":
+                items.append(item(dot(ascending, size), ", ".join(groups)))
+                continue
+            prefix = f"{', '.join(groups)} " if len(satellite_styles) > 1 else ""
+            items.append(item(dot(ascending, size), f"{prefix}ascending"))
+            items.append(item(dot(descending, size), f"{prefix}descending"))
+
+        link_styles = []
+        for u, v, data in self.graph.edges(data=True):
+            direction = str(data.get("direction", data.get("type", "Unknown")))
+            style = (direction, *self._edge_style(self.graph.nodes[u], self.graph.nodes[v], direction))
+            if style not in link_styles:
+                link_styles.append(style)
+        order = list(self.LINK_LABELS)
+        link_styles.sort(key=lambda style: order.index(style[0]) if style[0] in order else len(order))
+        items += [
+            item(
+                f'<div class="legend-line" style="background-color: {color}; height: {max(2, min(6, width + 1))}px;"></div>',
+                self.LINK_LABELS.get(direction, direction),
+            )
+            for direction, color, width in link_styles
         ]
         items += [
-            f'<div class="legend-item"><div class="legend-line" style="background-color: {color};"></div>'
-            f"<span>{html.escape(label)}</span></div>"
-            for color, label in self._link_styles_in_use().values()
-        ]
-        items += [
-            f'<div class="legend-item"><div class="legend-path" style="background-color: {route["color"]};"></div>'
-            f"<span>{html.escape(label)}</span></div>"
+            item(f'<div class="legend-path" style="background-color: {self._route_color(route)};"></div>', label)
             for label, route in self.highlighted_paths.items()
         ]
         return "\n".join(items)
@@ -734,7 +913,7 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
         counters = "".join(
             f'<div class="info-item"><div class="info-label">{html.escape(label)}s</div>'
             f'<div class="info-value" id="count-{direction}">0</div></div>'
-            for direction, (_, label) in self._link_styles_in_use().items()
+            for direction, label in ((direction, self.LINK_LABELS[direction]) for direction in self._directions_in_use())
         )
         live_items = "".join(
             f'<div class="info-item live"><div class="info-label">{html.escape(label)}</div>'
@@ -848,7 +1027,20 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
                 }}
             }}
             positions[node.id] = position;
-            var color = Cesium.Color.fromCssColorString(node.color);
+            // Ascending / descending color: one interval per orbital phase.
+            function phaseColor(alpha) {{
+                var property = new Cesium.TimeIntervalCollectionProperty();
+                node.phases.forEach(function (phase, index) {{
+                    var next = index + 1 < node.phases.length ? node.phases[index + 1][0] : data.stop;
+                    property.intervals.addInterval(new Cesium.TimeInterval({{
+                        start: at(index === 0 ? 0 : phase[0]), stop: at(Math.max(next, phase[0])),
+                        isStopIncluded: index + 1 === node.phases.length,
+                        data: Cesium.Color.fromCssColorString(phase[1] ? node.ascending : node.descending).withAlpha(alpha)
+                    }}));
+                }});
+                return property;
+            }}
+            var color = phaseColor(1.0);
             var labelText = node.labels.length === 0 ? node.name : new Cesium.CallbackProperty(function (time) {{
                 return latest(node.labels, secondsAt(time), node.name);
             }}, false);
@@ -858,11 +1050,11 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
                 description: node.description,
                 position: position,
                 point: {{
-                    pixelSize: node.static ? 12 : 8, color: color,
+                    pixelSize: node.size, color: color,
                     outlineColor: node.static ? Cesium.Color.WHITE : Cesium.Color.BLACK, outlineWidth: node.static ? 2 : 1
                 }},
                 path: node.static || !data.trail ? undefined
-                    : {{ leadTime: 0, trailTime: data.trail, width: 1, material: color.withAlpha(0.35) }},
+                    : {{ leadTime: 0, trailTime: data.trail, width: 1, material: new Cesium.ColorMaterialProperty(phaseColor(0.35)) }},
                 label: {{
                     text: labelText, font: node.labels.length || node.static ? "bold 12px sans-serif" : "11px sans-serif",
                     fillColor: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 2,
@@ -876,13 +1068,13 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
         }});
 
         // Links: shown only while they exist, their ends follow both nodes.
-        var widths = {{ inter_shell: 3, ground: 2.5 }};
+        var highlightedDirections = {{ inter_shell: true, ground: true }};
         data.edges.forEach(function (edge, index) {{
             if (!positions[edge.a] || !positions[edge.b]) {{ return; }}
             var availability = new Cesium.TimeIntervalCollection(edge.intervals.map(function (interval) {{
                 return new Cesium.TimeInterval({{ start: at(interval[0]), stop: at(interval[1]) }});
             }}));
-            var highlighted = edge.direction in widths;
+            var highlighted = edge.direction in highlightedDirections;
             viewer.entities.add({{
                 id: "edge_" + index,
                 name: edge.direction + " link " + edge.a + " <-> " + edge.b,
@@ -890,7 +1082,7 @@ class AnimatedCesiumGraphVisualizer(CesiumGraphVisualizer):
                 availability: availability,
                 polyline: {{
                     positions: new Cesium.PositionPropertyArray([positions[edge.a], positions[edge.b]]),
-                    width: widths[edge.direction] || 1.5,
+                    width: edge.width,
                     arcType: Cesium.ArcType.NONE,
                     material: Cesium.Color.fromCssColorString(edge.color).withAlpha(
                         (highlighted ? 1.0 : 0.6) * (data.routes.length ? 0.45 : 1.0)

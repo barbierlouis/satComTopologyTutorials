@@ -181,6 +181,10 @@ class DynamicTopologyGraph:
         if self.graph.ecount() == 0:
             return [], math.inf
         source_vertex, target_vertex = self.vertex_ids([source, target])
+        # No path is a normal answer (a blackout). Check it first: on an unreachable target, igraph prints
+        # "Couldn't reach some vertices" (straight to stderr when the simulation runs in a worker thread).
+        if target_vertex not in self.graph.subcomponent(source_vertex):
+            return [], math.inf
         vertices = self.graph.get_shortest_path(source_vertex, to=target_vertex, weights="distance_km", output="vpath")
         if not vertices:
             return [], math.inf
